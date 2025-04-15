@@ -219,20 +219,22 @@ class HttpServerHandler extends SimpleChannelInboundHandler<FullHttpRequest> {
                 subprotocols = ctx.channel().attr(subprotocolsAttrKey).get();
             }
         }
-
+        ChannelPipeline pipeline = ctx.pipeline();
+        if (config.isUseCompressionHandler()) {
+            // Add WebSocketServerCompressionHandler, but don't shake hands
+            pipeline.addLast(new WebSocketServerCompressionHandler());
+            // Let the request by WebSocketServerCompressionHandler forwarding to the next handler
+            ctx.fireChannelRead(req.retain());
+        }
         // Handshake
         WebSocketServerHandshakerFactory wsFactory = new WebSocketServerHandshakerFactory(getWebSocketLocation(req), subprotocols, true, config.getmaxFramePayloadLength());
         WebSocketServerHandshaker handshaker = wsFactory.newHandshaker(req);
         if (handshaker == null) {
             WebSocketServerHandshakerFactory.sendUnsupportedVersionResponse(channel);
         } else {
-            ChannelPipeline pipeline = ctx.pipeline();
             pipeline.remove(ctx.name());
             if (config.getReaderIdleTimeSeconds() != 0 || config.getWriterIdleTimeSeconds() != 0 || config.getAllIdleTimeSeconds() != 0) {
                 pipeline.addLast(new IdleStateHandler(config.getReaderIdleTimeSeconds(), config.getWriterIdleTimeSeconds(), config.getAllIdleTimeSeconds()));
-            }
-            if (config.isUseCompressionHandler()) {
-                pipeline.addLast(new WebSocketServerCompressionHandler());
             }
             pipeline.addLast(new WebSocketFrameAggregator(Integer.MAX_VALUE));
             if (config.isUseEventExecutorGroup()) {
@@ -241,7 +243,15 @@ class HttpServerHandler extends SimpleChannelInboundHandler<FullHttpRequest> {
                 pipeline.addLast(new WebSocketServerHandler(pojoEndpointServer));
             }
             String finalPattern = pattern;
-            handshaker.handshake(channel, req).addListener(future -> {
+
+            String header = headers.get(HttpHeaders.Names.SEC_WEBSOCKET_PROTOCOL);
+            HttpHeaders httpHeaders = null;
+            if (header!=null) {
+                httpHeaders = new DefaultHttpHeaders().add(HttpHeaders.Names.SEC_WEBSOCKET_PROTOCOL, header);
+            }
+            final ChannelFuture handshakeFuture = handshaker.handshake(ctx.channel(), req,httpHeaders,ctx.channel().newPromise());
+
+            handshakeFuture.addListener((ChannelFutureListener) future -> {
                 if (future.isSuccess()) {
                     if (isCors) {
                         pipeline.remove(CorsHandler.class);
